@@ -27,7 +27,15 @@ else
     } >> "$ROOTFS_DIR/etc/rear/rescue.conf"
 fi
 
+# If restoring to a client FD other than the source of the backup, check that this is configured on the director
+if [ "$BAREOS_RESTORE_CLIENT" ]; then
+    if ! IsInArray "$BAREOS_RESTORE_CLIENT" "${clients[@]}"; then
+        Error "Bareos Restore Client ($BAREOS_RESTORE_CLIENT) is not available. Available clients:" "${clients[@]}"
+    fi
+fi
+
+# Only the restore destination FD needs to be available, so don't check both.
 # bareos_ensure_client_is_available exists on error.
-bareos_ensure_client_is_available "$BAREOS_CLIENT"
+bareos_ensure_client_is_available "${BAREOS_RESTORE_CLIENT:-$BAREOS_CLIENT}"
 
 LogPrint "Using '$BAREOS_CLIENT' as BAREOS_CLIENT."
