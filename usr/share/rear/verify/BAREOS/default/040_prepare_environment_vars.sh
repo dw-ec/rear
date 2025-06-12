@@ -13,3 +13,7 @@ if [ -n "$BAREOS_RESTORE_JOB" ]; then
     # shellcheck disable=SC2034
     RESTOREJOB_AS_JOB="job=\"$BAREOS_RESTORE_JOB\""
 fi
+
+if [ -n "$BAREOS_RESTORE_CLIENT" ]; then
+    RESTORECLIENT="restoreclient=\"$BAREOS_RESTORE_CLIENT\""
+fi
