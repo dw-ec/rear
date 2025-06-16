@@ -409,8 +409,44 @@ if test -s $TMP_DIR/mappings/ip_addresses ; then
             rebuild_interfaces_file_from_linearized "$linearized_network_interfaces_file" > "$network_interfaces_file"
             # End handling Debian and Ubuntu network configuration files (with network interfaces configuration files):
         done
-
         # End of "while read interface old_mac new_mac new_ip_cidr":
+
+        # Handle NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        for restored_file in $TARGET_FS_ROOT/etc/NetworkManager/system-connections/*.nmconnection ; do
+            nm_conn_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
+
+            # Only modify connections with matching device name
+            grep -q "^interface-name=$interface$" || continue
+
+            # Deal with IPv4 and IPv6 addresses in their appropriate sections
+            local section=ipv4
+
+            if grep -q ":" <<<"$new_ip" ; then
+                # Contains a colon - must be IPv6
+                section=ipv6
+            fi
+
+            # Only substitute IP & CIDR if line is in the appropriate section, i.e. [ipv4] or [ipv6]
+            awk_script='  $0 ~ "^\\["section"]$" { in_section=1 ; print ; next }'
+            awk_script+=' /^\[/ && $0 !~ "^\\["section"]$" { in_section=0 }'
+
+            # Replace IP address & CIDR if found.
+            awk_script+=' in_section && /^address[0-9]+=/ { sub( /=.*/, "=" new_ip_cidr ) }'
+            # Note: address-specific gateway suffix fields are stripped.
+            # A default gateway field is added in the route mapping section
+
+            # Print any other lines verbatim
+            awk_script+=' { print }'
+
+            Log "Migrating network configuration in $nm_conn_file"
+            Debug "awk_script for setting new IP-address/CIDR: '$awk_script'"
+            Debug "section: $section new_ip_cidr: $new_ip_cidr"
+
+            awk -v section=$section -v new_ip_cidr="$new_ip_cidr" "$awk_script" "$nm_conn_file" || LogPrintError "Failed to migrate network configuration in $nm_conn_file"
+
+            # End handling NetworkManager keyfile-style configuration files
+        done
+
     done < $TMP_DIR/mappings/join_mac_ip_addresses
     # End changing IP addresses and CIDR or netmask in network configuration files when there is content in .../mappings/ip_addresses:
 fi
@@ -446,6 +482,7 @@ if test -s $TMP_DIR/mappings/routes ; then
         fi
         # Set default routing:
         Log "Setting new default routing in network configuration files"
+
         # Handle Fedora and SUSE default routing configuration files (with sysconfig ifcfg configuration files).
         # Because the bash option nullglob is set in rear (see usr/sbin/rear) nothing is done if no file matches.
         # FIXME: The following code fails if file names contain characters from IFS (e.g. blanks),
@@ -483,8 +520,45 @@ if test -s $TMP_DIR/mappings/routes ; then
             sed -i -e "$sed_script" "$linearized_network_interfaces_file" || LogPrintError "Failed to set default routing in $linearized_network_interfaces_file"
             rebuild_interfaces_file_from_linearized "$linearized_network_interfaces_file" > "$network_interfaces_file"
         done
+
+        # Handle NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        for restored_file in $TARGET_FS_ROOT/etc/NetworkManager/system-connections/*.nmconnection ; do
+            nm_conn_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
+
+            # Only modify connections with matching device names
+            grep -q "^interface-name=$interface$" || continue
+
+            # Deal with IPv4 and IPv6 addresses in their appropriate sections
+            local section=ipv4
+
+            if grep -q ":" <<<"$gateway" ; then
+                # Contains a colon - must be IPv6
+                section=ipv6
+            fi
+
+            # Only modify strings if line is in the appropriate section i.e. [ipv4] or [ipv6],
+            # Set new default gateway at top of [section] because other fields might not be present to match against
+            awk_script='  $0 ~ "^\\["section"]$" { in_section=1 ; print ; print "gateway=" gateway ; next }'
+            awk_script+=' /^\[/ && $0 !~ "^\\["section"]$" { in_section=0 }'
+
+            # Strip out old gateway lines
+            awk_script+=' in_section && /^gateway=/ { next }'
+
+            # Print any other lines verbatim
+            awk_script+=' { print }'
+
+            Log "Migrating gateway configuration in $nm_conn_file"
+            Debug "awk_script for setting new default gateway: '$awk_script'"
+            Debug "section: $section gateway: $gateway"
+
+            awk -v section=$section -v gateway="$gateway" "$awk_script" "$nm_conn_file" || LogPrintError "Failed to migrate gateway configuration in $nm_conn_file"
+
+            # End of NetworkManager keyfile style config files
+        done
+
         # End of "while read interface old_mac new_mac destination gateway":
     done < $TMP_DIR/mappings/join_mac_routes
+
     # End setting new default routing when there is content in ...mappings/routes:
 fi
 
