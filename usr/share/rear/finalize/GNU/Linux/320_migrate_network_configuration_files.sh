@@ -223,6 +223,10 @@ fi
 
 # Change IP addresses and CIDR or netmask in network configuration files when there is content in .../mappings/ip_addresses:
 if test -s $TMP_DIR/mappings/ip_addresses ; then
+
+    # Counter for NetworkManager addressN lines in each file
+    declare -A NM_ADDR_COUNTER
+
     Log "Changing IP addresses and CIDR or netmask in network configuration files"
     # mappings/mac is e.g. (old-MAC-address new-MAC-address interface):
     #   00:11:85:c2:b8:d5 00:50:56:b3:75:ad eth0
@@ -419,30 +423,36 @@ if test -s $TMP_DIR/mappings/ip_addresses ; then
             grep -q "^interface-name=$interface$" || continue
 
             # Deal with IPv4 and IPv6 addresses in their appropriate sections
-            local section=ipv4
+            local protocol=ipv4
 
             if grep -q ":" <<<"$new_ip" ; then
                 # Contains a colon - must be IPv6
-                section=ipv6
+                protocol=ipv6
             fi
+            #TODO: what if new mapping only has IPv4 or IPv6 but old system had both? Delete the section with no map entry?
+
+            # Keep track of how many addressN lines have already been added to this file, for each protocol type 
+            local counter=$(( ++NM_ADDR_COUNTER["$nm_conn_file:$protocol"] ))
 
             # Only substitute IP & CIDR if line is in the appropriate section, i.e. [ipv4] or [ipv6]
-            awk_script='  $0 ~ "^\\["section"]$" { in_section=1 ; print ; next }'
-            awk_script+=' /^\[/ && $0 !~ "^\\["section"]$" { in_section=0 }'
+            awk_script+=' /^\[/ && $0 !~ "^\\["protocol"]$" { in_section=0 }'
 
-            # Replace IP address & CIDR if found.
-            awk_script+=' in_section && /^address[0-9]+=/ { sub( /=.*/, "=" new_ip_cidr ) }'
-            # Note: address-specific gateway suffix fields are stripped.
-            # A default gateway field is added in the route mapping section
+            # Insert new addressN line after section opening
+            awk_script='  $0 ~ "^\\["protocol"]$" { in_section=1 ; print ; next ; print "address" counter "=" new_ip_cidr }'
+
+            ## Replace IP address & CIDR if found.
+            #awk_script+=' in_section && /^address[0-9]+=/ { sub( /=.*/, "=" new_ip_cidr ) }'
+            ## Note: address-specific gateway suffix fields are stripped.
+            ## A default gateway field is added in the route mapping section
 
             # Print any other lines verbatim
             awk_script+=' { print }'
 
             Log "Migrating network configuration in $nm_conn_file"
             Debug "awk_script for setting new IP-address/CIDR: '$awk_script'"
-            Debug "section: $section new_ip_cidr: $new_ip_cidr"
+            Debug "section: $protocol new_ip_cidr: $new_ip_cidr"
 
-            awk -v section=$section -v new_ip_cidr="$new_ip_cidr" "$awk_script" "$nm_conn_file" || LogPrintError "Failed to migrate network configuration in $nm_conn_file"
+            awk -v section=$protocol -v new_ip_cidr="$new_ip_cidr" -v counter=$counter "$awk_script" "$nm_conn_file" || LogPrintError "Failed to migrate network configuration in $nm_conn_file"
 
             # End handling NetworkManager keyfile-style configuration files
         done
@@ -453,6 +463,10 @@ fi
 
 # Setting new default routing when there is content in ...mappings/routes:
 if test -s $TMP_DIR/mappings/routes ; then
+
+    # Counter for NetworkManager routeN lines in each file
+    declare -A NM_ROUTE_COUNTER
+
     # Tell the user to do things manually in case of route-<interface> or static-routes configuration files.
     # FIXME: The following code fails if file names contain characters from IFS (e.g. blanks),
     # see https://github.com/rear/rear/pull/1514#discussion_r141031975
@@ -523,23 +537,34 @@ if test -s $TMP_DIR/mappings/routes ; then
 
         # Handle NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
         for restored_file in $TARGET_FS_ROOT/etc/NetworkManager/system-connections/*.nmconnection ; do
-            nm_conn_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
+            routing_config_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
 
             # Only modify connections with matching device names
             grep -q "^interface-name=$interface$" || continue
 
             # Deal with IPv4 and IPv6 addresses in their appropriate sections
-            local section=ipv4
+            local protocol=ipv4
 
             if grep -q ":" <<<"$gateway" ; then
                 # Contains a colon - must be IPv6
-                section=ipv6
+                protocol=ipv6
             fi
 
+            # Keep track of how many routeN lines have already been added to this file, for each protocol type 
+            local counter=$(( ++NM_ROUTE_COUNTER["$routing_config_file:$protocol"] ))
+
+            # fields for reference: interface old_mac new_mac destination gateway junk
+
             # Only modify strings if line is in the appropriate section i.e. [ipv4] or [ipv6],
-            # Set new default gateway at top of [section] because other fields might not be present to match against
-            awk_script='  $0 ~ "^\\["section"]$" { in_section=1 ; print ; print "gateway=" gateway ; next }'
-            awk_script+=' /^\[/ && $0 !~ "^\\["section"]$" { in_section=0 }'
+            awk_script+=' /^\[/ && $0 !~ "^\\["protocol"]$" { in_section=0 }'
+
+            # Set new routes at top of [section] because other fields might not be present to match against
+            if [ "$gateway" == "default" ] ; then
+		    awk_script='  $0 ~ "^\\["protocol"]$" { in_section=1 ; print ; print "gateway=" gateway ; next }'
+            else
+		    awk_script='  $0 ~ "^\\["protocol"]$" { in_section=1 ; print ; print "route" counter "=" dest "," gateway ; next }'
+            fi
+
 
             # Strip out old gateway lines
             awk_script+=' in_section && /^gateway=/ { next }'
@@ -547,11 +572,11 @@ if test -s $TMP_DIR/mappings/routes ; then
             # Print any other lines verbatim
             awk_script+=' { print }'
 
-            Log "Migrating gateway configuration in $nm_conn_file"
+            Log "Migrating gateway configuration in $routing_config_file"
             Debug "awk_script for setting new default gateway: '$awk_script'"
-            Debug "section: $section gateway: $gateway"
+            Debug "section: $protocol gateway: $gateway"
 
-            awk -v section=$section -v gateway="$gateway" "$awk_script" "$nm_conn_file" || LogPrintError "Failed to migrate gateway configuration in $nm_conn_file"
+            awk -v section=$protocol -v gateway="$gateway" "$awk_script" "$routing_config_file" || LogPrintError "Failed to migrate gateway configuration in $routing_config_file"
 
             # End of NetworkManager keyfile style config files
         done
