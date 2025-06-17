@@ -225,7 +225,7 @@ fi
 if test -s $TMP_DIR/mappings/ip_addresses ; then
 
     # Array for assembling network manager "addressN=" lines to insert into connection files
-    declare -A NM_ADDRESS
+    declare -A nm_address
 
     Log "Changing IP addresses and CIDR or netmask in network configuration files"
     # mappings/mac is e.g. (old-MAC-address new-MAC-address interface):
@@ -429,15 +429,15 @@ if test -s $TMP_DIR/mappings/ip_addresses ; then
                 protocol=ipv6
             fi
 
-            # New "addressN=" lines are being collected in the NM_ADDRESS array to insert later.
-            # Example of NM_ADDRESS array key: "/path/to/ens10.connection:ipv4"
+            # New "addressN=" lines are being collected in the nm_address array to insert later.
+            # Example of nm_address array key: "/path/to/ens10.connection:ipv4"
             local key="$nm_conn_file:$protocol"
 
             # Count the existing entries to determine the suffix of new address item e.g. address1, address99
-            local address_index=$( wc -l <<<"${NM_ADDRESS[$key]}" )
+            local address_index=$( wc -l <<<"${nm_address[$key]}" )
 
             # Add a line like "address2=44.131.42.2/16" to the list
-            NM_ADDRESS[$key]+="address${address_index}=$new_ip_cidr"$'\n'
+            nm_address[$key]+="address${address_index}=$new_ip_cidr"$'\n'
 
             # End NetworkManager IP address lines preparation
         done
@@ -451,8 +451,7 @@ fi
 if test -s $TMP_DIR/mappings/routes ; then
 
     # Array for gathering network manager routeN lines to insert into connection files
-    declare -A nm_routes
-    local nm_default
+    declare -A nm_route
 
     # Tell the user to do things manually in case of route-<interface> or static-routes configuration files.
     # FIXME: The following code fails if file names contain characters from IFS (e.g. blanks),
@@ -527,9 +526,11 @@ if test -s $TMP_DIR/mappings/routes ; then
             rebuild_interfaces_file_from_linearized "$linearized_network_interfaces_file" > "$network_interfaces_file"
         done
 
-        # Prepare routes in NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
-        # A list is assembled for each config file and these are modified after the main loop.
+        # Prepare routes for NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        # A list is assembled for each config file and affected files are modified after the main loop.
         for restored_file in $TARGET_FS_ROOT/etc/NetworkManager/system-connections/*.nmconnection ; do
+            # fields for reference: interface old_mac new_mac destination gateway junk
+
             nm_conn_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
 
             # Only modify connections with matching device names
@@ -541,23 +542,97 @@ if test -s $TMP_DIR/mappings/routes ; then
                 protocol=ipv6
             fi
 
-            # fields for reference: interface old_mac new_mac destination gateway junk
-
             # New "routeN=" lines are being collected in the nm_route array to insert later.
             # Example of nm_route array key: "/path/to/ens10.connection:ipv4"
             local key="$nm_conn_file:$protocol"
 
-            # Count the existing entries to determine the suffix of new address item e.g. route1, route99
-            local route_index=$( wc -l <<<"${nm_route[$key]}" )
+            if [ "$destination" == "default" || "$destination" =~ "/0$" ] ; then
+                nm_route["$key"]+=$'gateway=$gateway\n'
+            else
 
-            # Add a line like "route2=172.16.99.0/24,192.168.44.210" to the list
-            nm_route[$key]+="route${route_index}=$destination,$gateway"$'\n'
+                # Count the existing entries to determine the suffix of new address item e.g. route1, route99
+                local route_index=$( echo "${nm_route[$key]}" | grep -v gateway | wc -l )
+
+                # Add a line like "route2=172.16.99.0/24,192.168.44.210" to the list
+                nm_route["$key"]+="route${route_index}=$destination,$gateway"$'\n'
+            fi
 
             # End NetworkManager IP route lines preparation
         done
 
         # End of "while read interface old_mac new_mac destination gateway":
     done < $TMP_DIR/mappings/join_mac_routes
+
+
+    # Finish migrating affected NetworkManager files.
+    # Todo: These two loops could probably be combined with an outer loop, or made into a function
+    # to reduce repetition (but at the cost of clarity).
+
+    # Swap old address lines for new ones
+    for nm_address_key in "${!nm_address[@]}" ; do
+
+        # The array key is in the form "$filename:$section", so extract the 2 components
+        local nm_conn_file
+        local protocol
+        if [[ "$nm_address_key" =~ ^(.+):(ipv[46])$ ]] ; then
+            nm_conn_file="${BASH_REMATCH[1]}"
+            protocol=${BASH_REMATCH[2]}
+        fi
+
+        # Create AWK script to transform NetworkManager connection file.
+        # Strip out old address lines
+        local awk_script="  /^address[0-9]+=.*$/ { next }"
+
+        # Insert new addresses after [ipvX] section heading
+        awk_script+=" $0 ~ "^\\["protocol"]$" { print ; print new_addresses ; next }"
+
+        # Leave any other lines as they were
+        awk_script+=" { print }"
+
+        Debug "awk_script for migrating NetworkManager address lines: '$awk_script'"
+
+        if awk -v protocol=$protocol -v new_addresses="${nm_address["$nm_address_key"]}" "$awk_script" "$nm_conn_file" ; then
+            Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
+        else
+            LogPrintError "NetworkManager address migration AWK script failed for $nm_conn_file, $protocol section"
+            return 1
+        fi
+
+    done
+
+    # Swap old route lines for new ones
+    for nm_route_key in "${!nm_route[@]}" ; do
+
+        # The array key is in the form "$filename:$section", so extract the 2 components
+        local nm_conn_file
+        local protocol
+        if [[ "$nm_address_key" =~ ^(.+):(ipv[46])$ ]] ; then
+            nm_conn_file="${BASH_REMATCH[1]}"
+            protocol=${BASH_REMATCH[2]}
+        fi
+
+        # Create AWK script to transform NM connection file.
+        # Strip out old route lines
+        local awk_script="  /^route[0-9]+=.*$/ { next }"
+
+        # Insert new gateway and routes after [ipvX] section heading
+        awk_script+=" $0 ~ "^\\["protocol"]$" { print ; print new_routes ; next }"
+
+        # Leave any other lines as they were
+        awk_script+=" { print }"
+
+        Debug "awk_script for migrating NetworkManager route lines: '$awk_script'"
+
+        if awk -v protocol=$protocol -v new_routes="${nm_route["$nm_route_key"]}" "$awk_script" "$nm_conn_file" ; then
+            Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
+        else
+            LogPrintError "NetworkManager routes migration AWK script failed for $nm_conn_file, $protocol section"
+            return 1
+        fi
+
+    done
+
+    # End final migration NetworkManager connection file steps
 
     # End setting new default routing when there is content in ...mappings/routes:
 fi
