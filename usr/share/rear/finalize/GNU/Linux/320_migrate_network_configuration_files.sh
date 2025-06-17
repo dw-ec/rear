@@ -546,8 +546,8 @@ if test -s $TMP_DIR/mappings/routes ; then
             # Example of nm_route array key: "/path/to/ens10.connection:ipv4"
             local key="$nm_conn_file:$protocol"
 
-            if [ "$destination" == "default" || "$destination" =~ "/0$" ] ; then
-                nm_route["$key"]+=$'gateway=$gateway\n'
+            if [[ "$destination" == "default" || "$destination" =~ "/0$" ]] ; then
+                nm_route["$key"]+="gateway=$gateway"$'\n'
             else
 
                 # Count the existing entries to determine the suffix of new address item e.g. route1, route99
@@ -563,79 +563,91 @@ if test -s $TMP_DIR/mappings/routes ; then
         # End of "while read interface old_mac new_mac destination gateway":
     done < $TMP_DIR/mappings/join_mac_routes
 
-
-    # Finish migrating affected NetworkManager files.
-    # Todo: These two loops could probably be combined with an outer loop, or made into a function
-    # to reduce repetition (but at the cost of clarity).
-
-    # Swap old address lines for new ones
-    for nm_address_key in "${!nm_address[@]}" ; do
-
-        # The array key is in the form "$filename:$section", so extract the 2 components
-        local nm_conn_file
-        local protocol
-        if [[ "$nm_address_key" =~ ^(.+):(ipv[46])$ ]] ; then
-            nm_conn_file="${BASH_REMATCH[1]}"
-            protocol=${BASH_REMATCH[2]}
-        fi
-
-        # Create AWK script to transform NetworkManager connection file.
-        # Strip out old address lines
-        local awk_script="  /^address[0-9]+=.*$/ { next }"
-
-        # Insert new addresses after [ipvX] section heading
-        awk_script+=" $0 ~ "^\\["protocol"]$" { print ; print new_addresses ; next }"
-
-        # Leave any other lines as they were
-        awk_script+=" { print }"
-
-        Debug "awk_script for migrating NetworkManager address lines: '$awk_script'"
-
-        if awk -v protocol=$protocol -v new_addresses="${nm_address["$nm_address_key"]}" "$awk_script" "$nm_conn_file" ; then
-            Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
-        else
-            LogPrintError "NetworkManager address migration AWK script failed for $nm_conn_file, $protocol section"
-            return 1
-        fi
-
-    done
-
-    # Swap old route lines for new ones
-    for nm_route_key in "${!nm_route[@]}" ; do
-
-        # The array key is in the form "$filename:$section", so extract the 2 components
-        local nm_conn_file
-        local protocol
-        if [[ "$nm_address_key" =~ ^(.+):(ipv[46])$ ]] ; then
-            nm_conn_file="${BASH_REMATCH[1]}"
-            protocol=${BASH_REMATCH[2]}
-        fi
-
-        # Create AWK script to transform NM connection file.
-        # Strip out old route lines
-        local awk_script="  /^route[0-9]+=.*$/ { next }"
-
-        # Insert new gateway and routes after [ipvX] section heading
-        awk_script+=" $0 ~ "^\\["protocol"]$" { print ; print new_routes ; next }"
-
-        # Leave any other lines as they were
-        awk_script+=" { print }"
-
-        Debug "awk_script for migrating NetworkManager route lines: '$awk_script'"
-
-        if awk -v protocol=$protocol -v new_routes="${nm_route["$nm_route_key"]}" "$awk_script" "$nm_conn_file" ; then
-            Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
-        else
-            LogPrintError "NetworkManager routes migration AWK script failed for $nm_conn_file, $protocol section"
-            return 1
-        fi
-
-    done
-
-    # End final migration NetworkManager connection file steps
-
     # End setting new default routing when there is content in ...mappings/routes:
 fi
+
+# Finish migrating affected NetworkManager files.
+# Todo: These two loops could probably be combined with an outer loop, or made into a function
+# to reduce repetition (but at the cost of clarity).
+
+# Swap old route lines for new ones
+for nm_route_key in "${!nm_route[@]}" ; do
+
+    # The array key is in the form "$filename:$section", so extract the 2 components
+    local nm_conn_file
+    local protocol
+    if [[ "$nm_route_key" =~ ^(.+):(ipv[46])$ ]] ; then
+        nm_conn_file="${BASH_REMATCH[1]}"
+        protocol=${BASH_REMATCH[2]}
+    else
+        LogPrintError "Couldn't parse array key"
+        LogPrintError "nm_route_key: $nm_route_key"
+        LogPrintError "nm_conn_file: $nm_conn_file"
+        LogPrintError "protocol: $protocol"
+    fi
+
+    # Create AWK script to transform NM connection file.
+    # Strip out old route and gateway lines
+    local awk_script='  /^route[0-9]+=.*$/ { next }'
+    local awk_script+=' /^gateway=.*$/ { next }'
+
+    # Insert new gateway and routes after [ipvX] section heading
+    awk_script+=' $0 ~ "^\\["protocol"]$" { print ; print new_routes ; next }'
+
+    # Leave any other lines as they were
+    awk_script+=' { print }'
+
+    Debug "awk_script for migrating NetworkManager route lines: '$awk_script'"
+
+    if awk -v protocol=$protocol -v new_routes="${nm_route["$nm_route_key"]}" "$awk_script" "$nm_conn_file" > "$TMP_DIR/$( basename "$nm_conn_file" )" ; then
+        Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
+        mv "$TMP_DIR/$( basename "$nm_conn_file" )" "$nm_conn_file"
+    else
+        LogPrintError "NetworkManager routes migration AWK script failed for $nm_conn_file, $protocol section"
+        return 1
+    fi
+
+done
+
+# Swap old address lines for new ones
+for nm_address_key in "${!nm_address[@]}" ; do
+
+    # The array key is in the form "$filename:$section", so extract the 2 components
+    local nm_conn_file
+    local protocol
+    if [[ "$nm_address_key" =~ ^(.+):(ipv[46])$ ]] ; then
+        nm_conn_file="${BASH_REMATCH[1]}"
+        protocol=${BASH_REMATCH[2]}
+    else
+        LogPrintError "Couldn't parse array key"
+        LogPrintError "nm_route_key: $nm_route_key"
+        LogPrintError "nm_conn_file: $nm_conn_file"
+        LogPrintError "protocol: $protocol"
+    fi
+
+    # Create AWK script to transform NetworkManager connection file.
+    # Strip out old address lines
+    local awk_script='  /^address[0-9]+=.*$/ { next }'
+
+    # Insert new addresses after [ipvX] section heading
+    awk_script+=' $0 ~ "^\\["protocol"]$" { print ; print new_addresses ; next }'
+
+    # Leave any other lines as they were
+    awk_script+=' { print }'
+
+    Debug "awk_script for migrating NetworkManager address lines: '$awk_script'"
+
+    if awk -v protocol=$protocol -v new_addresses="${nm_address["$nm_address_key"]}" "$awk_script" "$nm_conn_file" > "$TMP_DIR/$( basename "$nm_conn_file" )" ; then
+        Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
+        mv "$TMP_DIR/$( basename "$nm_conn_file" )" "$nm_conn_file"
+    else
+        LogPrintError "NetworkManager address migration AWK script failed for $nm_conn_file, $protocol section"
+        return 1
+    fi
+
+done
+
+# End final migration NetworkManager connection file steps
 
 unset -f valid_restored_file_for_patching
 
