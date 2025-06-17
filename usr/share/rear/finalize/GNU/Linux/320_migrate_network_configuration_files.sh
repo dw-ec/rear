@@ -224,8 +224,8 @@ fi
 # Change IP addresses and CIDR or netmask in network configuration files when there is content in .../mappings/ip_addresses:
 if test -s $TMP_DIR/mappings/ip_addresses ; then
 
-    # Counter for NetworkManager addressN lines in each file
-    declare -A NM_ADDR_COUNTER
+    # Array for assembling network manager "addressN=" lines to insert into connection files
+    declare -A NM_ADDRESS
 
     Log "Changing IP addresses and CIDR or netmask in network configuration files"
     # mappings/mac is e.g. (old-MAC-address new-MAC-address interface):
@@ -413,50 +413,36 @@ if test -s $TMP_DIR/mappings/ip_addresses ; then
             rebuild_interfaces_file_from_linearized "$linearized_network_interfaces_file" > "$network_interfaces_file"
             # End handling Debian and Ubuntu network configuration files (with network interfaces configuration files):
         done
-        # End of "while read interface old_mac new_mac new_ip_cidr":
 
-        # Handle NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        # Prepare NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        # New "addressN=" lines are gathered here to be inserted after the main loop, after old ones are removed.
         for restored_file in $TARGET_FS_ROOT/etc/NetworkManager/system-connections/*.nmconnection ; do
             nm_conn_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
 
             # Only modify connections with matching device name
-            grep -q "^interface-name=$interface$" || continue
+            grep -q "^interface-name=$interface$" "$nm_conn_file" || continue
 
-            # Deal with IPv4 and IPv6 addresses in their appropriate sections
+            # Process IPv4 and IPv6 addresses in their appropriate sections
             local protocol=ipv4
 
-            if grep -q ":" <<<"$new_ip" ; then
-                # Contains a colon - must be IPv6
+            if [[ "$new_ip" =~ ":" ]] ; then
                 protocol=ipv6
             fi
-            #TODO: what if new mapping only has IPv4 or IPv6 but old system had both? Delete the section with no map entry?
 
-            # Keep track of how many addressN lines have already been added to this file, for each protocol type 
-            local counter=$(( ++NM_ADDR_COUNTER["$nm_conn_file:$protocol"] ))
+            # New "addressN=" lines are being collected in the NM_ADDRESS array to insert later.
+            # Example of NM_ADDRESS array key: "/path/to/ens10.connection:ipv4"
+            local key="$nm_conn_file:$protocol"
 
-            # Only substitute IP & CIDR if line is in the appropriate section, i.e. [ipv4] or [ipv6]
-            awk_script+=' /^\[/ && $0 !~ "^\\["protocol"]$" { in_section=0 }'
+            # Count the existing entries to determine the suffix of new address item e.g. address1, address99
+            local address_index=$( wc -l <<<"${NM_ADDRESS[$key]}" )
 
-            # Insert new addressN line after section opening
-            awk_script='  $0 ~ "^\\["protocol"]$" { in_section=1 ; print ; next ; print "address" counter "=" new_ip_cidr }'
+            # Add a line like "address2=44.131.42.2/16" to the list
+            NM_ADDRESS[$key]+="address${address_index}=$new_ip_cidr"$'\n'
 
-            ## Replace IP address & CIDR if found.
-            #awk_script+=' in_section && /^address[0-9]+=/ { sub( /=.*/, "=" new_ip_cidr ) }'
-            ## Note: address-specific gateway suffix fields are stripped.
-            ## A default gateway field is added in the route mapping section
-
-            # Print any other lines verbatim
-            awk_script+=' { print }'
-
-            Log "Migrating network configuration in $nm_conn_file"
-            Debug "awk_script for setting new IP-address/CIDR: '$awk_script'"
-            Debug "section: $protocol new_ip_cidr: $new_ip_cidr"
-
-            awk -v section=$protocol -v new_ip_cidr="$new_ip_cidr" -v counter=$counter "$awk_script" "$nm_conn_file" || LogPrintError "Failed to migrate network configuration in $nm_conn_file"
-
-            # End handling NetworkManager keyfile-style configuration files
+            # End NetworkManager IP address lines preparation
         done
 
+        # End of "while read interface old_mac new_mac new_ip_cidr":
     done < $TMP_DIR/mappings/join_mac_ip_addresses
     # End changing IP addresses and CIDR or netmask in network configuration files when there is content in .../mappings/ip_addresses:
 fi
@@ -464,8 +450,9 @@ fi
 # Setting new default routing when there is content in ...mappings/routes:
 if test -s $TMP_DIR/mappings/routes ; then
 
-    # Counter for NetworkManager routeN lines in each file
-    declare -A NM_ROUTE_COUNTER
+    # Array for gathering network manager routeN lines to insert into connection files
+    declare -A nm_routes
+    local nm_default
 
     # Tell the user to do things manually in case of route-<interface> or static-routes configuration files.
     # FIXME: The following code fails if file names contain characters from IFS (e.g. blanks),
@@ -489,13 +476,8 @@ if test -s $TMP_DIR/mappings/routes ; then
     join -1 3 -2 3 $TMP_DIR/mappings/mac $TMP_DIR/mappings/routes > $TMP_DIR/mappings/join_mac_routes
     # Read $TMP_DIR/mappings/join_mac_routes contents:
     while read interface old_mac new_mac destination gateway junk ; do
-        if ! test "$destination" = "default" ; then
-            # Tell the user to set non-default routing manually (i.e. non-default destination like 192.168.100.0/24)
-            LogPrintError "Cannot set routing for non-default destination $destination via gateway $gateway and interface $interface - you need to do that manually"
-            continue
-        fi
         # Set default routing:
-        Log "Setting new default routing in network configuration files"
+        Log "Setting new routing in network configuration files"
 
         # Handle Fedora and SUSE default routing configuration files (with sysconfig ifcfg configuration files).
         # Because the bash option nullglob is set in rear (see usr/sbin/rear) nothing is done if no file matches.
@@ -503,6 +485,11 @@ if test -s $TMP_DIR/mappings/routes ; then
         # see https://github.com/rear/rear/pull/1514#discussion_r141031975
         # and for the general issue see https://github.com/rear/rear/issues/1372
         for restored_file in $TARGET_FS_ROOT/etc/sysconfig/*/ifcfg-*$new_mac* $TARGET_FS_ROOT/etc/sysconfig/*/ifcfg-*$interface* $TARGET_FS_ROOT/etc/sysconfig/ne[t]work ; do
+            if ! test "$destination" = "default" ; then
+                # Tell the user to set non-default routing manually (i.e. non-default destination like 192.168.100.0/24)
+                LogPrintError "Cannot set routing for non-default destination $destination via gateway $gateway and interface $interface - you need to do that manually"
+                continue
+            fi
             routing_config_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
             # etc/sysconfig/network syntay (excerpts):
             #   GATEWAY=gwip where gwip is the IP address of the remote network gateway if available
@@ -518,6 +505,11 @@ if test -s $TMP_DIR/mappings/routes ; then
         # see https://github.com/rear/rear/pull/1514#discussion_r141031975
         # and for the general issue see https://github.com/rear/rear/issues/1372
         for restored_file in $TARGET_FS_ROOT/etc/network/inter[f]aces $TARGET_FS_ROOT/etc/network/interfaces.d/* ; do
+            if ! test "$destination" = "default" ; then
+                # Tell the user to set non-default routing manually (i.e. non-default destination like 192.168.100.0/24)
+                LogPrintError "Cannot set routing for non-default destination $destination via gateway $gateway and interface $interface - you need to do that manually"
+                continue
+            fi
             # To be on the safe side we do not use 'interfaces_file' as variable name here because
             # that name is used as non-local name in the linearize_interfaces_file function which is called below
             # regardless that currently the linearize_interfaces_file function would not change an outer interfaces_file value
@@ -535,50 +527,33 @@ if test -s $TMP_DIR/mappings/routes ; then
             rebuild_interfaces_file_from_linearized "$linearized_network_interfaces_file" > "$network_interfaces_file"
         done
 
-        # Handle NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        # Prepare routes in NetworkManager keyfile-style configuration files used by e.g. Red Hat 9
+        # A list is assembled for each config file and these are modified after the main loop.
         for restored_file in $TARGET_FS_ROOT/etc/NetworkManager/system-connections/*.nmconnection ; do
-            routing_config_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
+            nm_conn_file="$( valid_restored_file_for_patching "$restored_file" )" || continue
 
             # Only modify connections with matching device names
-            grep -q "^interface-name=$interface$" || continue
+            grep -q "^interface-name=$interface$" "$nm_conn_file" || continue
 
             # Deal with IPv4 and IPv6 addresses in their appropriate sections
             local protocol=ipv4
-
-            if grep -q ":" <<<"$gateway" ; then
-                # Contains a colon - must be IPv6
+            if [[ "$gateway" =~ ":" ]] ; then
                 protocol=ipv6
             fi
 
-            # Keep track of how many routeN lines have already been added to this file, for each protocol type 
-            local counter=$(( ++NM_ROUTE_COUNTER["$routing_config_file:$protocol"] ))
-
             # fields for reference: interface old_mac new_mac destination gateway junk
 
-            # Only modify strings if line is in the appropriate section i.e. [ipv4] or [ipv6],
-            awk_script+=' /^\[/ && $0 !~ "^\\["protocol"]$" { in_section=0 }'
+            # New "routeN=" lines are being collected in the nm_route array to insert later.
+            # Example of nm_route array key: "/path/to/ens10.connection:ipv4"
+            local key="$nm_conn_file:$protocol"
 
-            # Set new routes at top of [section] because other fields might not be present to match against
-            if [ "$gateway" == "default" ] ; then
-		    awk_script='  $0 ~ "^\\["protocol"]$" { in_section=1 ; print ; print "gateway=" gateway ; next }'
-            else
-		    awk_script='  $0 ~ "^\\["protocol"]$" { in_section=1 ; print ; print "route" counter "=" dest "," gateway ; next }'
-            fi
+            # Count the existing entries to determine the suffix of new address item e.g. route1, route99
+            local route_index=$( wc -l <<<"${nm_route[$key]}" )
 
+            # Add a line like "route2=172.16.99.0/24,192.168.44.210" to the list
+            nm_route[$key]+="route${route_index}=$destination,$gateway"$'\n'
 
-            # Strip out old gateway lines
-            awk_script+=' in_section && /^gateway=/ { next }'
-
-            # Print any other lines verbatim
-            awk_script+=' { print }'
-
-            Log "Migrating gateway configuration in $routing_config_file"
-            Debug "awk_script for setting new default gateway: '$awk_script'"
-            Debug "section: $protocol gateway: $gateway"
-
-            awk -v section=$protocol -v gateway="$gateway" "$awk_script" "$routing_config_file" || LogPrintError "Failed to migrate gateway configuration in $routing_config_file"
-
-            # End of NetworkManager keyfile style config files
+            # End NetworkManager IP route lines preparation
         done
 
         # End of "while read interface old_mac new_mac destination gateway":
