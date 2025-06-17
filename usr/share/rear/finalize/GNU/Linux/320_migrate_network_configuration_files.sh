@@ -431,13 +431,13 @@ if test -s $TMP_DIR/mappings/ip_addresses ; then
 
             # New "addressN=" lines are being collected in the nm_address array to insert later.
             # Example of nm_address array key: "/path/to/ens10.connection:ipv4"
-            local key="$nm_conn_file:$protocol"
+            local address_key="$nm_conn_file:$protocol"
 
             # Count the existing entries to determine the suffix of new address item e.g. address1, address99
-            local address_index=$( wc -l <<<"${nm_address[$key]}" )
+            local address_index=$( wc -l <<<"${nm_address[$address_key]}" )
 
             # Add a line like "address2=44.131.42.2/16" to the list
-            nm_address[$key]+="address${address_index}=$new_ip_cidr"$'\n'
+            nm_address[$address_key]+="address${address_index}=$new_ip_cidr"$'\n'
 
             # End NetworkManager IP address lines preparation
         done
@@ -544,17 +544,17 @@ if test -s $TMP_DIR/mappings/routes ; then
 
             # New "routeN=" lines are being collected in the nm_route array to insert later.
             # Example of nm_route array key: "/path/to/ens10.connection:ipv4"
-            local key="$nm_conn_file:$protocol"
+            local route_key="$nm_conn_file:$protocol"
 
             if [[ "$destination" == "default" || "$destination" =~ "/0$" ]] ; then
-                nm_route["$key"]+="gateway=$gateway"$'\n'
+                nm_route["$route_key"]+="gateway=$gateway"$'\n'
             else
 
                 # Count the existing entries to determine the suffix of new address item e.g. route1, route99
-                local route_index=$( echo "${nm_route[$key]}" | grep -v gateway | wc -l )
+                local route_index=$( echo "${nm_route[$route_key]}" | grep -v gateway | wc -l )
 
                 # Add a line like "route2=172.16.99.0/24,192.168.44.210" to the list
-                nm_route["$key"]+="route${route_index}=$destination,$gateway"$'\n'
+                nm_route["$route_key"]+="route${route_index}=$destination,$gateway"$'\n'
             fi
 
             # End NetworkManager IP route lines preparation
@@ -567,9 +567,13 @@ if test -s $TMP_DIR/mappings/routes ; then
 fi
 
 # Finish migrating affected NetworkManager files.
+# Note this only modifies connection files with mappings declared; all other
+# files remain unmodified. If only IPv4 mappings are declared, IPv6 sections
+# remain unmodified.
+# Todo: Allow static-IP <-> DHCP migrations (currently only static -> static is supported).
 # Todo: These two loops could probably be combined with an outer loop, or made into a function
 # to reduce repetition (but at the cost of clarity).
-
+#
 # Swap old route lines for new ones
 for nm_route_key in "${!nm_route[@]}" ; do
 
@@ -586,9 +590,10 @@ for nm_route_key in "${!nm_route[@]}" ; do
         LogPrintError "protocol: $protocol"
     fi
 
-    # Create AWK script to transform NM connection file.
+    # Create AWK script to transform NetworkManager connection file.
     # Strip out old route and gateway lines
     local awk_script='  /^route[0-9]+=.*$/ { next }'
+    local awk_script='  /^route[0-9]+_options=.*$/ { next }'
     local awk_script+=' /^gateway=.*$/ { next }'
 
     # Insert new gateway and routes after [ipvX] section heading
@@ -620,7 +625,7 @@ for nm_address_key in "${!nm_address[@]}" ; do
         protocol=${BASH_REMATCH[2]}
     else
         LogPrintError "Couldn't parse array key"
-        LogPrintError "nm_route_key: $nm_route_key"
+        LogPrintError "nm_address_key: $nm_address_key"
         LogPrintError "nm_conn_file: $nm_conn_file"
         LogPrintError "protocol: $protocol"
     fi
@@ -646,8 +651,8 @@ for nm_address_key in "${!nm_address[@]}" ; do
     fi
 
 done
-
-# End final migration NetworkManager connection file steps
+#
+# End of final steps of NetworkManager connection file migration
 
 unset -f valid_restored_file_for_patching
 
