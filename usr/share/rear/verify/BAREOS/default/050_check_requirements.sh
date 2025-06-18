@@ -16,4 +16,4 @@ if ! bconsole -t; then
 fi
 
 # status is good or it errors out
-bareos_ensure_client_is_available "${BAREOS_RESTORE_CLIENT:-BAREOS_CLIENT}"
+bareos_ensure_client_is_available "${BAREOS_RESTORE_CLIENT:-$BAREOS_CLIENT}"
