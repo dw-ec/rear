@@ -607,6 +607,7 @@ for nm_route_key in "${!nm_route[@]}" ; do
     if awk -v protocol=$protocol -v new_routes="${nm_route["$nm_route_key"]}" "$awk_script" "$nm_conn_file" > "$TMP_DIR/$( basename "$nm_conn_file" )" ; then
         Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
         mv "$TMP_DIR/$( basename "$nm_conn_file" )" "$nm_conn_file"
+        chmod 0600 "$nm_conn_file"
     else
         LogPrintError "NetworkManager routes migration AWK script failed for $nm_conn_file, $protocol section"
         return 1
@@ -645,6 +646,7 @@ for nm_address_key in "${!nm_address[@]}" ; do
     if awk -v protocol=$protocol -v new_addresses="${nm_address["$nm_address_key"]}" "$awk_script" "$nm_conn_file" > "$TMP_DIR/$( basename "$nm_conn_file" )" ; then
         Debug "awk_script applied successfully to $nm_conn_file, $protocol section"
         mv "$TMP_DIR/$( basename "$nm_conn_file" )" "$nm_conn_file"
+        chmod 0600 "$nm_conn_file"
     else
         LogPrintError "NetworkManager address migration AWK script failed for $nm_conn_file, $protocol section"
         return 1
